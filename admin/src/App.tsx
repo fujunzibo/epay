@@ -7,11 +7,15 @@ import OrderDetailPage from "./pages/OrderDetailPage";
 import WalletsPage from "./pages/WalletsPage";
 import ReconcilePage from "./pages/ReconcilePage";
 import ToolsPage from "./pages/ToolsPage";
+import CheckoutPage from "./pages/CheckoutPage";
+import CheckoutSuccessPage from "./pages/CheckoutSuccessPage";
 
 export default function App() {
   return (
     <AntdApp>
       <Routes>
+        <Route path="/checkout" element={<CheckoutPage />} />
+        <Route path="/checkout/success" element={<CheckoutSuccessPage />} />
         <Route path="/" element={<AdminLayout />}>
           <Route index element={<Navigate to="/dashboard" replace />} />
           <Route path="dashboard" element={<DashboardPage />} />

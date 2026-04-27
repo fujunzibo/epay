@@ -12,6 +12,7 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"math"
 	"net/http"
 	"os"
 	"strconv"
@@ -22,13 +23,18 @@ import (
 	"github.com/google/uuid"
 	_ "github.com/jackc/pgx/v5/stdlib"
 	"github.com/stripe/stripe-go/v79"
+	checkoutsession "github.com/stripe/stripe-go/v79/checkout/session"
 	"github.com/stripe/stripe-go/v79/webhook"
 )
 
 type Config struct {
 	HTTPAddr               string
 	PostgresDSN            string
+	StripeSecretKey        string
 	StripeWebhookSecret    string
+	CheckoutPublicBaseURL  string
+	USDCReceiveAddress     string
+	USDCReceiveChain       string
 	USDCWebhookBearerToken string
 	USDCWebhookHMACSecret  string
 	USDCMinConfirmations   int
@@ -45,7 +51,11 @@ func LoadConfigFromEnv() Config {
 	return Config{
 		HTTPAddr:               getEnv("HTTP_ADDR", ":8080"),
 		PostgresDSN:            getEnv("POSTGRES_DSN", "postgres://postgres:postgres@localhost:5432/epay?sslmode=disable"),
+		StripeSecretKey:        os.Getenv("STRIPE_SECRET_KEY"),
 		StripeWebhookSecret:    os.Getenv("STRIPE_WEBHOOK_SECRET"),
+		CheckoutPublicBaseURL:  strings.TrimSpace(os.Getenv("PUBLIC_CHECKOUT_BASE_URL")),
+		USDCReceiveAddress:     strings.TrimSpace(os.Getenv("USDC_RECEIVE_ADDRESS")),
+		USDCReceiveChain:       getEnv("USDC_RECEIVE_CHAIN", "ethereum"),
 		USDCWebhookBearerToken: os.Getenv("USDC_WEBHOOK_BEARER"),
 		USDCWebhookHMACSecret:  os.Getenv("USDC_WEBHOOK_HMAC_SECRET"),
 		USDCMinConfirmations:   getEnvInt("USDC_MIN_CONFIRMATIONS", 1),
@@ -145,6 +155,8 @@ type bindOneAPIReq struct {
 
 func (a *App) routes() {
 	a.mux.HandleFunc("POST /payments/orders", a.handleCreateOrder)
+	a.mux.HandleFunc("POST /payments/checkout/stripe", a.handleCheckoutStripe)
+	a.mux.HandleFunc("POST /payments/checkout/crypto", a.handleCheckoutCrypto)
 	a.mux.HandleFunc("GET /payments/orders", a.handleListOrders)
 	a.mux.HandleFunc("GET /payments/orders/{orderNo}", a.handleGetOrder)
 	a.mux.HandleFunc("POST /payments/orders/{orderNo}/retry-credit", a.handleRetryCredit)
@@ -192,6 +204,156 @@ func (a *App) handleCreateOrder(w http.ResponseWriter, r *http.Request) {
 	}
 
 	writeJSON(w, http.StatusCreated, map[string]string{"order_no": orderNo, "status": "pending"})
+}
+
+type checkoutStripeReq struct {
+	CustomerID string  `json:"customer_id"`
+	Amount     float64 `json:"amount"`
+	Currency   string  `json:"currency"`
+}
+
+func (a *App) handleCheckoutStripe(w http.ResponseWriter, r *http.Request) {
+	var req checkoutStripeReq
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid json"})
+		return
+	}
+	req.CustomerID = strings.TrimSpace(req.CustomerID)
+	if req.CustomerID == "" || req.Amount <= 0 {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "customer_id and positive amount required"})
+		return
+	}
+	currency := strings.TrimSpace(strings.ToUpper(req.Currency))
+	if currency == "" {
+		currency = "USD"
+	}
+	if strings.TrimSpace(a.cfg.StripeSecretKey) == "" {
+		writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "STRIPE_SECRET_KEY not configured"})
+		return
+	}
+	base := strings.TrimRight(strings.TrimSpace(a.cfg.CheckoutPublicBaseURL), "/")
+	if base == "" {
+		writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "PUBLIC_CHECKOUT_BASE_URL not configured"})
+		return
+	}
+	amountCents := int64(math.Round(req.Amount * 100))
+	if amountCents < 50 {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "amount too small for card checkout (min 0.50 in major units)"})
+		return
+	}
+
+	orderNo := "ord_" + strings.ReplaceAll(uuid.NewString(), "-", "")
+	meta := map[string]interface{}{"checkout": "stripe"}
+	metaJSON, _ := json.Marshal(meta)
+	if metaJSON == nil {
+		metaJSON = []byte("{}")
+	}
+	_, err := a.db.ExecContext(r.Context(), `
+		INSERT INTO payment_order (id, order_no, customer_id, payment_method, provider, currency, amount, metadata)
+		VALUES ($1, $2, $3, 'fiat', 'stripe', $4, $5, $6::jsonb)
+	`, uuid.New(), orderNo, req.CustomerID, currency, req.Amount, string(metaJSON))
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "create order failed"})
+		return
+	}
+
+	stripe.Key = a.cfg.StripeSecretKey
+	successURL := fmt.Sprintf("%s/#/checkout/success?order_no=%s", base, orderNo)
+	cancelURL := fmt.Sprintf("%s/#/checkout", base)
+	params := &stripe.CheckoutSessionParams{
+		Mode:       stripe.String(string(stripe.CheckoutSessionModePayment)),
+		SuccessURL: stripe.String(successURL),
+		CancelURL:  stripe.String(cancelURL),
+		Metadata: map[string]string{
+			"order_no": orderNo,
+		},
+		LineItems: []*stripe.CheckoutSessionLineItemParams{
+			{
+				Quantity: stripe.Int64(1),
+				PriceData: &stripe.CheckoutSessionLineItemPriceDataParams{
+					Currency:   stripe.String(strings.ToLower(currency)),
+					UnitAmount: stripe.Int64(amountCents),
+					ProductData: &stripe.CheckoutSessionLineItemPriceDataProductDataParams{
+						Name: stripe.String("Account top-up"),
+					},
+				},
+			},
+		},
+	}
+	sess, err := checkoutsession.New(params)
+	if err != nil {
+		log.Printf("stripe checkout session failed: %v", err)
+		writeJSON(w, http.StatusBadGateway, map[string]string{"error": "stripe checkout failed"})
+		return
+	}
+	if sess.URL == "" {
+		writeJSON(w, http.StatusBadGateway, map[string]string{"error": "stripe returned empty checkout url"})
+		return
+	}
+	writeJSON(w, http.StatusCreated, map[string]string{"order_no": orderNo, "checkout_url": sess.URL, "status": "pending"})
+}
+
+type checkoutCryptoReq struct {
+	CustomerID string  `json:"customer_id"`
+	Amount     float64 `json:"amount"`
+	Currency   string  `json:"currency"`
+}
+
+func (a *App) handleCheckoutCrypto(w http.ResponseWriter, r *http.Request) {
+	var req checkoutCryptoReq
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid json"})
+		return
+	}
+	req.CustomerID = strings.TrimSpace(req.CustomerID)
+	if req.CustomerID == "" || req.Amount <= 0 {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "customer_id and positive amount required"})
+		return
+	}
+	addr := strings.TrimSpace(a.cfg.USDCReceiveAddress)
+	if addr == "" {
+		writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "USDC_RECEIVE_ADDRESS not configured"})
+		return
+	}
+	currency := strings.TrimSpace(strings.ToUpper(req.Currency))
+	if currency == "" {
+		currency = "USD"
+	}
+	chain := strings.TrimSpace(a.cfg.USDCReceiveChain)
+	if chain == "" {
+		chain = "ethereum"
+	}
+
+	orderNo := "ord_" + strings.ReplaceAll(uuid.NewString(), "-", "")
+	meta := map[string]interface{}{
+		"checkout":        "crypto",
+		"deposit_token":   "USDC",
+		"deposit_chain":   chain,
+		"deposit_address": addr,
+	}
+	metaJSON, _ := json.Marshal(meta)
+	if metaJSON == nil {
+		metaJSON = []byte("{}")
+	}
+	_, err := a.db.ExecContext(r.Context(), `
+		INSERT INTO payment_order (id, order_no, customer_id, payment_method, provider, currency, amount, metadata)
+		VALUES ($1, $2, $3, 'crypto', 'usdc', $4, $5, $6::jsonb)
+	`, uuid.New(), orderNo, req.CustomerID, currency, req.Amount, string(metaJSON))
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "create order failed"})
+		return
+	}
+
+	writeJSON(w, http.StatusCreated, map[string]interface{}{
+		"order_no":     orderNo,
+		"status":       "pending",
+		"amount":       req.Amount,
+		"currency":     currency,
+		"token":        "USDC",
+		"chain":        chain,
+		"to_address":   addr,
+		"instructions": "Send the exact USDC amount on the configured network to the address above. Your payment will be confirmed after your indexer calls the USDC webhook with tx details.",
+	})
 }
 
 func (a *App) handleListOrders(w http.ResponseWriter, r *http.Request) {

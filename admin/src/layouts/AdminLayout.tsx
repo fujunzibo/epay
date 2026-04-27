@@ -6,6 +6,7 @@ import {
   WalletOutlined,
   AuditOutlined,
   ToolOutlined,
+  ShopOutlined,
 } from "@ant-design/icons";
 import { Outlet, useLocation, useNavigate } from "react-router-dom";
 
@@ -13,6 +14,7 @@ const { Header, Sider, Content } = Layout;
 
 const menuItems = [
   { key: "/dashboard", icon: <DashboardOutlined />, label: "Dashboard" },
+  { key: "/checkout", icon: <ShopOutlined />, label: "收银台" },
   { key: "/orders", icon: <OrderedListOutlined />, label: "Orders" },
   { key: "/wallets", icon: <WalletOutlined />, label: "Wallets" },
   { key: "/reconcile", icon: <AuditOutlined />, label: "Reconcile" },
@@ -30,6 +32,7 @@ export default function AdminLayout() {
   const selected =
     menuItems.find((m) => {
       if (m.key === "/dashboard") return loc.pathname === "/dashboard";
+      if (m.key === "/checkout") return loc.pathname.startsWith("/checkout");
       return loc.pathname === m.key || loc.pathname.startsWith(`${m.key}/`);
     })?.key ?? "/dashboard";
 

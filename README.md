@@ -2,6 +2,7 @@
 
 This is a 2-3 day MVP scaffold for:
 - **React admin UI** (`admin/`, Ant Design + Vite + HashRouter)
+- **Customer checkout** (card via Stripe Checkout, USDC instructions + QR)
 - Unified payment orders (`fiat` / `crypto`)
 - Stripe standard webhook ingestion (`payment_intent.succeeded` / `checkout.session.completed` / `invoice.payment_succeeded`)
 - USDC webhook ingestion with confirmation check
@@ -25,7 +26,11 @@ Create database and run migration:
 ```bash
 set HTTP_ADDR=:8080
 set POSTGRES_DSN=postgres://postgres:postgres@localhost:5432/epay?sslmode=disable
+set STRIPE_SECRET_KEY=sk_live_xxx
 set STRIPE_WEBHOOK_SECRET=whsec_xxx
+set PUBLIC_CHECKOUT_BASE_URL=https://epay.example.com/admin
+set USDC_RECEIVE_ADDRESS=0xYourTreasuryAddress
+set USDC_RECEIVE_CHAIN=ethereum
 set USDC_WEBHOOK_BEARER=your_usdc_webhook_token
 set USDC_WEBHOOK_HMAC_SECRET=your_usdc_hmac_secret
 set USDC_MIN_CONFIRMATIONS=1
@@ -41,7 +46,9 @@ set ONEAPI_RETRY_SECONDS=30
 
 If you want local testing without signature enforcement, leave `STRIPE_WEBHOOK_SECRET` and `USDC_WEBHOOK_HMAC_SECRET` empty.
 
-`CORS_ALLOW_ORIGINS` is a comma-separated list of browser origins allowed to call the API (used when the admin runs on Vite dev port `5173`).
+`CORS_ALLOW_ORIGINS` is a comma-separated list of browser origins allowed to call the API (include your deployed admin origin, e.g. `https://epay.example.com`).
+
+**Checkout:** `PUBLIC_CHECKOUT_BASE_URL` must be the **public URL of the SPA without a trailing hash** (e.g. `https://epay.example.com/admin`). Stripe redirects use `/#/checkout/success?order_no=...`. `STRIPE_SECRET_KEY` is required for card checkout. `USDC_RECEIVE_ADDRESS` (and optional `USDC_RECEIVE_CHAIN`) are required for the crypto tab; chain confirmations still arrive via your existing `POST /payments/webhook/usdc` integration.
 
 ## 3) Run
 
@@ -93,6 +100,25 @@ go run ./cmd/server
 Open **http://localhost:18080/admin/** (redirects to `/admin/`) then use the sidebar, or go directly to **http://localhost:18080/admin/#/dashboard**.
 
 Override static directory with `ADMIN_STATIC_DIR` if you build the UI elsewhere.
+
+### Customer checkout (browser)
+
+After `npm run build` and with `STRIPE_SECRET_KEY`, `PUBLIC_CHECKOUT_BASE_URL`, and `USDC_RECEIVE_ADDRESS` set, customers can open:
+
+- **收银台:** `{PUBLIC_CHECKOUT_BASE_URL}/#/checkout`  
+  Example: `https://epay.example.com/admin/#/checkout`
+
+**Backend helpers** (used by the checkout page):
+
+```bash
+curl -X POST http://localhost:8080/payments/checkout/stripe ^
+  -H "Content-Type: application/json" ^
+  -d "{\"customer_id\":\"cust_001\",\"amount\":20,\"currency\":\"USD\"}"
+
+curl -X POST http://localhost:8080/payments/checkout/crypto ^
+  -H "Content-Type: application/json" ^
+  -d "{\"customer_id\":\"cust_001\",\"amount\":20,\"currency\":\"USD\"}"
+```
 
 ## 4) API quickstart
 
