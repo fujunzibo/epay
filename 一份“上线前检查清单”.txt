@@ -1,0 +1,65 @@
+一份“上线前检查清单”（环境变量、告警、幂等、防重放、对账）。
+
+上线前检查清单（ePay + OneAPI）
+1) 环境变量与基础配置
+POSTGRES_DSN 指向生产库，开启 TLS（不要 sslmode=disable）。
+STRIPE_WEBHOOK_SECRET、USDC_WEBHOOK_HMAC_SECRET 必填，禁止空值上线。
+USDC_WEBHOOK_BEARER、ALERT_WEBHOOK_BEARER、ONEAPI_TOPUP_BEARER 使用高强度随机值。
+ONEAPI_TOPUP_URL 使用内网地址 + 固定路径，不走公网。
+ONEAPI_TIMEOUT_SECONDS、ONEAPI_RETRY_SECONDS 根据 SLA 调整（建议超时 3-10s，重试 30-120s）。
+CORS_ALLOW_ORIGINS 仅保留正式前端域名，去掉 localhost。
+2) 数据库与迁移
+已执行 001_init.sql、002_oneapi_sync.sql，并在生产库校验表结构。
+为核心表建立备份策略（至少每日全量 + binlog/WAL 保留）。
+校验时区一致性（DB 与应用都用 UTC）。
+确认数据库连接池参数符合并发预期（max_open_conns 等）。
+3) 支付回调安全（防伪造/防重放）
+Stripe 回调必须验签（Stripe-Signature + STRIPE_WEBHOOK_SECRET）。
+USDC 回调必须校验 Bearer + HMAC（X-USDC-Signature）。
+在网关层限制回调来源 IP（可选但推荐）。
+增加回调时间窗校验（例如 5 分钟内有效）防重放。
+所有回调请求体落审计日志（脱敏后）以便追查。
+4) 幂等与一致性
+payment_event.event_key 唯一约束有效（已做）。
+wallet_ledger (order_no, entry_type) 唯一约束有效（已做）。
+oneapi_credit_job.order_no 唯一，确保一单只同步一次（已做）。
+OneAPI 充值接口也要支持幂等键（建议用 order_no）。
+明确“先记账/后同步”与失败补偿策略，并演练一次。
+5) 告警与可观测性
+配置 ALERT_WEBHOOK_URL 并验证可达。
+告警项至少包含：stripe_payment_failed、retry_credit_failed、oneapi_credit_failed。
+对 oneapi_credit_job.status != synced 的积压量做阈值告警。
+监控接口可用：/metrics/payment、/ops/reconcile/summary。
+日志平台可按 order_no 全链路检索（创建单、回调、入账、同步）。
+6) 对账机制（每日必须跑）
+每日定时跑 reconcile（或调用 /ops/reconcile/*）并归档结果。
+重点关注：
+uncredited_paid_orders > 0
+orders_no_event > 0
+oneapi_credit_job 中 failed/pending 长时间不下降
+建立人工处理 SOP：失败重试、人工补单、退款回滚。
+7) 失败与回滚演练（上线前必做）
+场景 A：支付成功但 OneAPI 不可用 -> 任务 failed -> 恢复后 retry 成功。
+场景 B：重复回调（同一 event 多次）-> 钱包与 OneAPI 不重复加款。
+场景 C：金额/币种不匹配 -> 订单不入账并可告警。
+场景 D：绑定缺失 -> 不同步，绑定后可恢复。
+场景 E：OneAPI 返回 5xx/超时 -> 自动重试 + 告警。
+8) 真实 OneAPI 联调注意
+约定接口返回码：仅 2xx 视为成功，其他都进入重试。
+约定错误体格式（建议返回 code/message），便于 last_error 可读。
+约定签名机制（建议 HMAC：timestamp + body）防伪造。
+约定幂等字段（order_no）与冲突处理语义（重复请求返回成功态）。
+保留沙箱环境，禁止直接在生产首测。
+9) 部署与发布流程
+先发 server 再发 worker，避免任务无人消费。
+采用蓝绿/滚动发布，避免中断 webhook 接收。
+发布后先做一笔 0.01/1.00 小额真单验证全链路。
+保留快速回滚版本与数据库备份快照。
+发布窗口内有人值守，直到关键指标稳定。
+10) 安全与权限
+所有 token 放密钥管理系统，不写入仓库/镜像。
+OneAPI 内部充值接口做来源鉴权（网络 ACL + Bearer + 签名）。
+管理接口（/ops/*）建议加管理员鉴权（当前项目默认未加）。
+审计日志脱敏（token、签名头、用户敏感信息）。
+定期轮换 webhook secret 与 Bearer token。
+如果你要，我下一步可以按你现在代码直接给一份**“生产最小配置模板（.env 示例 + Nginx/网关要点 + systemd/docker-compose）”**，你可以直接照着上。

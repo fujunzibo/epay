@@ -1,0 +1,8 @@
+Invoke-RestMethod -Method Post -Uri "http://localhost:18080/payments/webhook/stripe" -ContentType "application/json" -Body "{""id"":""evt_123"",""type"":""payment_intent.succeeded"",""data"":{""object"":{""id"":""pi_123"",""amount_received"":2000,""currency"":""usd"",""metadata"":{""order_no"":""$ord""}}}}"
+
+status
+------
+ok
+
+
+PS D:\oneapi\epay> Invoke-RestMethod -Method Get -Uri "http://localhost:8080/ops/oneapi/jobs?limit=20"

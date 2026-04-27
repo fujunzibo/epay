@@ -1,0 +1,9 @@
+{
+  "name": "epay-tools",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Node helpers for ePay MVP integration testing",
+  "scripts": {
+    "mock:usdc": "node scripts/mock-usdc-webhook.js"
+  }
+}
