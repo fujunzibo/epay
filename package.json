@@ -3,6 +3,10 @@
   "version": "0.1.0",
   "private": true,
   "description": "Node helpers for ePay MVP integration testing",
+  "dependencies": {
+    "dotenv": "^8.2.0",
+    "node-fetch": "^3.3.2"
+  },
   "scripts": {
     "mock:usdc": "node scripts/mock-usdc-webhook.js"
   }
